@@ -1,0 +1,53 @@
+name: Sami Build
+
+on:
+  push:
+    branches: [sami]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "24.x"
+  PNPM_VERSION: "10.23.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build
+        run: pnpm build
+
+      - name: Verify build output
+        run: test -f dist/index.js
+
+      - uses: sjawhar/.github/.github/actions/sami-version@main
+        id: version
+        with:
+          source: node
+
+      - name: Package npm tarball
+        run: npm pack --ignore-scripts
+
+      - uses: sjawhar/.github/.github/actions/sami-release@main
+        with:
+          tag: ${{ steps.version.outputs.tag }}
+          files: "openclaw-*.tgz"

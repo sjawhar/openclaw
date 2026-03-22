@@ -4,10 +4,7 @@ import type {
   GroupPolicy,
   MarkdownConfig,
 } from "./types.base.js";
-import type {
-  ChannelHealthMonitorConfig,
-  ChannelHeartbeatVisibilityConfig,
-} from "./types.channels.js";
+import type { ChannelHeartbeatVisibilityConfig } from "./types.channels.js";
 import type { DmConfig } from "./types.messages.js";
 import type { GroupToolPolicyBySenderConfig, GroupToolPolicyConfig } from "./types.tools.js";
 
@@ -47,6 +44,8 @@ type WhatsAppSharedConfig = {
   selfChatMode?: boolean;
   /** Optional allowlist for WhatsApp direct chats (E.164). */
   allowFrom?: string[];
+  /** Optional allowlist for outbound WhatsApp sends (E.164). When set, overrides allowFrom for outbound target resolution. Use ["*"] for unrestricted outbound. */
+  allowSendTo?: string[];
   /** Default delivery target for CLI `--deliver` when no explicit `--reply-to` is provided (E.164 or group JID). */
   defaultTo?: string;
   /** Optional allowlist for WhatsApp group senders (E.164). */
@@ -81,8 +80,6 @@ type WhatsAppSharedConfig = {
   debounceMs?: number;
   /** Heartbeat visibility settings. */
   heartbeat?: ChannelHeartbeatVisibilityConfig;
-  /** Channel health monitor overrides for this channel/account. */
-  healthMonitor?: ChannelHealthMonitorConfig;
 };
 
 type WhatsAppConfigCore = {

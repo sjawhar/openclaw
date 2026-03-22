@@ -1,4 +1,5 @@
 import { buildDmGroupAccountAllowlistAdapter } from "openclaw/plugin-sdk/allowlist-config-edit";
+import { Type } from "@sinclair/typebox";
 // WhatsApp-specific imports from local extension code (moved from src/web/ and src/channels/plugins/)
 import { resolveWhatsAppAccount, type ResolvedWhatsAppAccount } from "./accounts.js";
 import type { WebChannelStatus } from "./auto-reply/types.js";
@@ -17,6 +18,7 @@ import {
   DEFAULT_ACCOUNT_ID,
   formatWhatsAppConfigAllowFromEntries,
   readStringParam,
+  resolveWhatsAppConfigAllowSendTo,
   resolveWhatsAppGroupIntroHint,
   resolveWhatsAppOutboundTarget,
   resolveWhatsAppHeartbeatRecipients,
@@ -125,12 +127,42 @@ export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {
       if (gate("polls")) {
         actions.add("poll");
       }
-      return { actions: Array.from(actions) };
+      actions.add("search");
+      return {
+        actions: Array.from(actions),
+        schema: {
+          properties: {
+            query: Type.Optional(Type.String({ description: "Full-text search query." })),
+            chat: Type.Optional(Type.String({ description: "Filter by chat name or JID." })),
+            sender: Type.Optional(Type.String({ description: "Filter by sender name or JID." })),
+            fromMe: Type.Optional(Type.Boolean({ description: "Only return messages sent by me." })),
+            since: Type.Optional(Type.String({ description: "ISO timestamp lower bound." })),
+            until: Type.Optional(Type.String({ description: "ISO timestamp upper bound." })),
+            limit: Type.Optional(Type.Number({ description: "Maximum result count." })),
+          },
+        },
+      };
     },
-    supportsAction: ({ action }) => action === "react",
+    supportsAction: ({ action }) => action === "react" || action === "search",
     handleAction: async ({ action, params, cfg, accountId }) => {
-      if (action !== "react") {
+      if (action !== "react" && action !== "search") {
         throw new Error(`Action ${action} is not supported for provider ${WHATSAPP_CHANNEL}.`);
+      }
+      if (action === "search") {
+        return await getWhatsAppRuntime().channel.whatsapp.handleWhatsAppAction(
+          {
+            action: "search",
+            query: readStringParam(params, "query"),
+            chat: readStringParam(params, "chat"),
+            sender: readStringParam(params, "sender"),
+            fromMe: typeof params.fromMe === "boolean" ? params.fromMe : undefined,
+            since: readStringParam(params, "since"),
+            until: readStringParam(params, "until"),
+            limit: params.limit,
+            accountId: accountId ?? undefined,
+          },
+          cfg,
+        );
       }
       const messageId = readStringParam(params, "messageId", {
         required: true,
@@ -161,8 +193,8 @@ export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {
       sendPollWhatsApp: async (...args) =>
         await getWhatsAppRuntime().channel.whatsapp.sendPollWhatsApp(...args),
       shouldLogVerbose: () => getWhatsAppRuntime().logging.shouldLogVerbose(),
-      resolveTarget: ({ to, allowFrom, mode }) =>
-        resolveWhatsAppOutboundTarget({ to, allowFrom, mode }),
+      resolveTarget: ({ to, allowFrom, allowSendTo, mode }) =>
+        resolveWhatsAppOutboundTarget({ to, allowFrom, allowSendTo, mode }),
     }),
     normalizePayload: ({ payload }) => ({
       ...payload,
@@ -260,6 +292,7 @@ export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {
         lastError: runtime?.lastError ?? null,
         dmPolicy: account.dmPolicy,
         allowFrom: account.allowFrom,
+        allowSendTo: account.allowSendTo,
       };
     },
     resolveAccountState: ({ configured }) => (configured ? "linked" : "not linked"),

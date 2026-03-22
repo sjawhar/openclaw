@@ -7,32 +7,57 @@ import {
 import { loadConfig, type OpenClawConfig } from "../../config/config.js";
 import { coerceSecretRef } from "../../config/types.secrets.js";
 import { withFileLock } from "../../infra/file-lock.js";
+import { resolvePluginProviders } from "../../plugins/providers.js";
+import { getActivePluginRegistry } from "../../plugins/runtime.js";
+import type { ProviderPlugin } from "../../plugins/types.js";
+import { refreshQwenPortalCredentials } from "../../providers/qwen-portal-oauth.js";
 import { resolveSecretRefString, type SecretRefResolveCache } from "../../secrets/resolve.js";
 import { refreshChutesTokens } from "../chutes-oauth.js";
+import { normalizeProviderId } from "../model-selection.js";
 import { AUTH_STORE_LOCK_OPTIONS, log } from "./constants.js";
 import { resolveTokenExpiryState } from "./credential-state.js";
 import { formatAuthDoctorHint } from "./doctor.js";
 import { ensureAuthStoreFile, resolveAuthStorePath } from "./paths.js";
 import { suggestOAuthProfileIdForLegacyDefault } from "./repair.js";
 import { ensureAuthProfileStore, saveAuthProfileStore } from "./store.js";
-import type { AuthProfileStore, OAuthCredential } from "./types.js";
+import type { AuthProfileCredential, AuthProfileStore, OAuthCredential } from "./types.js";
 
 const OAUTH_PROVIDER_IDS = new Set<string>(getOAuthProviders().map((provider) => provider.id));
-
-let providerRuntimePromise:
-  | Promise<typeof import("../../plugins/provider-runtime.runtime.js")>
-  | undefined;
-
-function loadProviderRuntime() {
-  providerRuntimePromise ??= import("../../plugins/provider-runtime.runtime.js");
-  return providerRuntimePromise;
-}
 
 const isOAuthProvider = (provider: string): provider is OAuthProvider =>
   OAUTH_PROVIDER_IDS.has(provider);
 
 const resolveOAuthProvider = (provider: string): OAuthProvider | null =>
   isOAuthProvider(provider) ? provider : null;
+
+function providerMatches(params: { provider: ProviderPlugin; id: string }): boolean {
+  const normalizedId = normalizeProviderId(params.id);
+  if (normalizeProviderId(params.provider.id) === normalizedId) {
+    return true;
+  }
+  return params.provider.aliases?.some((alias) => normalizeProviderId(alias) === normalizedId) ?? false;
+}
+
+function resolveRuntimeProviderPlugin(params: {
+  provider: string;
+  cfg?: OpenClawConfig;
+}): ProviderPlugin | null {
+  const activeRegistry = getActivePluginRegistry();
+  const activeMatch = activeRegistry?.providers.find((entry) =>
+    providerMatches({ provider: entry.provider, id: params.provider }),
+  );
+  if (activeMatch) {
+    return activeMatch.provider;
+  }
+  if (!params.cfg) {
+    return null;
+  }
+  return (
+    resolvePluginProviders({ config: params.cfg }).find((provider) =>
+      providerMatches({ provider, id: params.provider }),
+    ) ?? null
+  );
+}
 
 /** Bearer-token auth modes that are interchangeable (oauth tokens and raw tokens). */
 const BEARER_AUTH_MODES = new Set(["oauth", "token"]);
@@ -65,13 +90,26 @@ function isProfileConfigCompatible(params: {
   return true;
 }
 
-async function buildOAuthApiKey(provider: string, credentials: OAuthCredential): Promise<string> {
-  const { formatProviderAuthProfileApiKeyWithPlugin } = await loadProviderRuntime();
-  const formatted = formatProviderAuthProfileApiKeyWithPlugin({
-    provider,
-    context: credentials,
-  });
-  return typeof formatted === "string" && formatted.length > 0 ? formatted : credentials.access;
+function buildOAuthApiKey(params: {
+  provider: string;
+  credentials: OAuthCredentials;
+  cfg?: OpenClawConfig;
+}): string {
+  const runtimeProvider = resolveRuntimeProviderPlugin({ provider: params.provider, cfg: params.cfg });
+  if (runtimeProvider?.formatApiKey) {
+    return runtimeProvider.formatApiKey({
+      ...params.credentials,
+      type: "oauth",
+      provider: params.provider,
+    } satisfies AuthProfileCredential);
+  }
+  const needsProjectId = params.provider === "google-gemini-cli";
+  return needsProjectId
+    ? JSON.stringify({
+        token: params.credentials.access,
+        projectId: params.credentials.projectId,
+      })
+    : params.credentials.access;
 }
 
 function buildApiKeyProfileResult(params: { apiKey: string; provider: string; email?: string }) {
@@ -82,13 +120,18 @@ function buildApiKeyProfileResult(params: { apiKey: string; provider: string; em
   };
 }
 
-async function buildOAuthProfileResult(params: {
+function buildOAuthProfileResult(params: {
   provider: string;
-  credentials: OAuthCredential;
+  credentials: OAuthCredentials;
   email?: string;
+  cfg?: OpenClawConfig;
 }) {
   return buildApiKeyProfileResult({
-    apiKey: await buildOAuthApiKey(params.provider, params.credentials),
+    apiKey: buildOAuthApiKey({
+      provider: params.provider,
+      credentials: params.credentials,
+      cfg: params.cfg,
+    }),
     provider: params.provider,
     email: params.email,
   });
@@ -96,6 +139,23 @@ async function buildOAuthProfileResult(params: {
 
 function extractErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function shouldUseOpenaiCodexRefreshFallback(params: {
+  provider: string;
+  credentials: OAuthCredentials;
+  error: unknown;
+}): boolean {
+  if (normalizeProviderId(params.provider) !== "openai-codex") {
+    return false;
+  }
+  const message = extractErrorMessage(params.error);
+  if (!/extract\s+accountid\s+from\s+token/i.test(message)) {
+    return false;
+  }
+  return (
+    typeof params.credentials.access === "string" && params.credentials.access.trim().length > 0
+  );
 }
 
 type ResolveApiKeyForProfileParams = {
@@ -147,6 +207,7 @@ function adoptNewerMainOAuthCredential(params: {
 async function refreshOAuthTokenWithLock(params: {
   profileId: string;
   agentDir?: string;
+  cfg?: OpenClawConfig;
 }): Promise<{ apiKey: string; newCredentials: OAuthCredentials } | null> {
   const authPath = resolveAuthStorePath(params.agentDir);
   ensureAuthStoreFile(authPath);
@@ -160,39 +221,55 @@ async function refreshOAuthTokenWithLock(params: {
 
     if (Date.now() < cred.expires) {
       return {
-        apiKey: await buildOAuthApiKey(cred.provider, cred),
+        apiKey: buildOAuthApiKey({
+          provider: cred.provider,
+          credentials: cred,
+          cfg: params.cfg,
+        }),
         newCredentials: cred,
       };
     }
 
-    const { refreshProviderOAuthCredentialWithPlugin } = await loadProviderRuntime();
-    const pluginRefreshed = await refreshProviderOAuthCredentialWithPlugin({
+    const oauthCreds: Record<string, OAuthCredentials> = {
+      [cred.provider]: cred,
+    };
+    const runtimeProvider = resolveRuntimeProviderPlugin({
       provider: cred.provider,
-      context: cred,
+      cfg: params.cfg,
     });
-    if (pluginRefreshed) {
-      return {
-        apiKey: await buildOAuthApiKey(cred.provider, pluginRefreshed),
-        newCredentials: pluginRefreshed,
-      };
-    }
+    const refreshOAuth = runtimeProvider?.refreshOAuth;
 
-    const oauthCreds: Record<string, OAuthCredentials> = { [cred.provider]: cred };
-    const result =
-      String(cred.provider) === "chutes"
+    const result = refreshOAuth
+      ? await (async () => {
+          const newCredentials = await refreshOAuth(cred as OAuthCredential);
+          return {
+            apiKey: buildOAuthApiKey({
+              provider: cred.provider,
+              credentials: newCredentials,
+              cfg: params.cfg,
+            }),
+            newCredentials,
+          };
+        })()
+      : String(cred.provider) === "chutes"
         ? await (async () => {
             const newCredentials = await refreshChutesTokens({
               credential: cred,
             });
             return { apiKey: newCredentials.access, newCredentials };
           })()
-        : await (async () => {
-            const oauthProvider = resolveOAuthProvider(cred.provider);
-            if (!oauthProvider) {
-              return null;
-            }
-            return await getOAuthApiKey(oauthProvider, oauthCreds);
-          })();
+        : String(cred.provider) === "qwen-portal"
+          ? await (async () => {
+              const newCredentials = await refreshQwenPortalCredentials(cred);
+              return { apiKey: newCredentials.access, newCredentials };
+            })()
+          : await (async () => {
+              const oauthProvider = resolveOAuthProvider(cred.provider);
+              if (!oauthProvider) {
+                return null;
+              }
+              return await getOAuthApiKey(oauthProvider, oauthCreds);
+            })();
     if (!result) {
       return null;
     }
@@ -227,16 +304,18 @@ async function tryResolveOAuthProfile(
   }
 
   if (Date.now() < cred.expires) {
-    return await buildOAuthProfileResult({
+    return buildOAuthProfileResult({
       provider: cred.provider,
       credentials: cred,
       email: cred.email,
+      cfg,
     });
   }
 
   const refreshed = await refreshOAuthTokenWithLock({
     profileId,
     agentDir: params.agentDir,
+    cfg,
   });
   if (!refreshed) {
     return null;
@@ -372,7 +451,7 @@ export async function resolveApiKeyForProfile(
     }) ?? cred;
 
   if (Date.now() < oauthCred.expires) {
-    return await buildOAuthProfileResult({
+    return buildOAuthProfileResult({
       provider: oauthCred.provider,
       credentials: oauthCred,
       email: oauthCred.email,
@@ -396,7 +475,7 @@ export async function resolveApiKeyForProfile(
     const refreshedStore = ensureAuthProfileStore(params.agentDir);
     const refreshed = refreshedStore.profiles[profileId];
     if (refreshed?.type === "oauth" && Date.now() < refreshed.expires) {
-      return await buildOAuthProfileResult({
+      return buildOAuthProfileResult({
         provider: refreshed.provider,
         credentials: refreshed,
         email: refreshed.email ?? cred.email,
@@ -438,10 +517,11 @@ export async function resolveApiKeyForProfile(
             agentDir: params.agentDir,
             expires: new Date(mainCred.expires).toISOString(),
           });
-          return await buildOAuthProfileResult({
+          return buildOAuthProfileResult({
             provider: mainCred.provider,
             credentials: mainCred,
             email: mainCred.email,
+            cfg,
           });
         }
       } catch {
@@ -449,8 +529,26 @@ export async function resolveApiKeyForProfile(
       }
     }
 
+    if (
+      shouldUseOpenaiCodexRefreshFallback({
+        provider: cred.provider,
+        credentials: cred,
+        error,
+      })
+    ) {
+      log.warn("openai-codex oauth refresh failed; using cached access token fallback", {
+        profileId,
+        provider: cred.provider,
+      });
+      return buildApiKeyProfileResult({
+        apiKey: cred.access,
+        provider: cred.provider,
+        email: cred.email,
+      });
+    }
+
     const message = extractErrorMessage(error);
-    const hint = await formatAuthDoctorHint({
+    const hint = formatAuthDoctorHint({
       cfg,
       store: refreshedStore,
       provider: cred.provider,

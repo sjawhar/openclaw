@@ -1,8 +1,10 @@
-import { installCommonResolveTargetErrorCases } from "openclaw/plugin-sdk/testing";
 import { describe, expect, it, vi } from "vitest";
+import { installCommonResolveTargetErrorCases } from "../../shared/resolve-target-test-helpers.js";
 
-vi.mock("./runtime-api.js", async () => {
-  const actual = await vi.importActual<typeof import("./runtime-api.js")>("./runtime-api.js");
+vi.mock("openclaw/plugin-sdk/whatsapp", async () => {
+  const actual = await vi.importActual<typeof import("openclaw/plugin-sdk/whatsapp")>(
+    "openclaw/plugin-sdk/whatsapp",
+  );
   const normalizeWhatsAppTarget = (value: string) => {
     if (value === "invalid-target") return null;
     // Simulate E.164 normalization: strip leading + and whatsapp: prefix.
@@ -18,10 +20,12 @@ vi.mock("./runtime-api.js", async () => {
     resolveWhatsAppOutboundTarget: ({
       to,
       allowFrom,
+      allowSendTo,
       mode,
     }: {
       to?: string;
       allowFrom: string[];
+      allowSendTo?: string[];
       mode: "explicit" | "implicit";
     }) => {
       const raw = typeof to === "string" ? to.trim() : "";
@@ -34,8 +38,10 @@ vi.mock("./runtime-api.js", async () => {
       }
 
       if (mode === "implicit" && !normalized.endsWith("@g.us")) {
-        const allowAll = allowFrom.includes("*");
-        const allowExact = allowFrom.some((entry) => {
+        // Use allowSendTo if defined, otherwise fall back to allowFrom
+        const effectiveList = allowSendTo ?? allowFrom;
+        const allowAll = effectiveList.includes("*");
+        const allowExact = effectiveList.some((entry) => {
           if (!entry) {
             return false;
           }

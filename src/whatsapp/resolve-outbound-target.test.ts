@@ -1,12 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import * as normalize from "./normalize.js";
+import { resolveWhatsAppOutboundTarget } from "./resolve-outbound-target.js";
 
 vi.mock("./normalize.js");
 vi.mock("../infra/outbound/target-errors.js", () => ({
   missingTargetError: (platform: string, format: string) => new Error(`${platform}: ${format}`),
 }));
-
-let resolveWhatsAppOutboundTarget: typeof import("./resolve-outbound-target.js").resolveWhatsAppOutboundTarget;
 
 type ResolveParams = Parameters<typeof resolveWhatsAppOutboundTarget>[0];
 const PRIMARY_TARGET = "+11234567890";
@@ -38,6 +37,7 @@ function expectAllowedForTarget(params: {
   allowFrom: ResolveParams["allowFrom"];
   mode: ResolveParams["mode"];
   to?: string;
+  allowSendTo?: ResolveParams["allowSendTo"];
 }) {
   const to = params.to ?? PRIMARY_TARGET;
   expectResolutionOk(
@@ -45,6 +45,7 @@ function expectAllowedForTarget(params: {
       to,
       allowFrom: params.allowFrom,
       mode: params.mode,
+      allowSendTo: params.allowSendTo,
     },
     to,
   );
@@ -54,19 +55,19 @@ function expectDeniedForTarget(params: {
   allowFrom: ResolveParams["allowFrom"];
   mode: ResolveParams["mode"];
   to?: string;
+  allowSendTo?: ResolveParams["allowSendTo"];
 }) {
   expectResolutionError({
     to: params.to ?? PRIMARY_TARGET,
     allowFrom: params.allowFrom,
     mode: params.mode,
+    allowSendTo: params.allowSendTo,
   });
 }
 
 describe("resolveWhatsAppOutboundTarget", () => {
-  beforeEach(async () => {
-    vi.resetModules();
+  beforeEach(() => {
     vi.resetAllMocks();
-    ({ resolveWhatsAppOutboundTarget } = await import("./resolve-outbound-target.js"));
   });
 
   describe("empty/missing to parameter", () => {
@@ -200,6 +201,64 @@ describe("resolveWhatsAppOutboundTarget", () => {
     it("allows message in custom mode string when target is in allowList", () => {
       mockNormalizedDirectMessage(PRIMARY_TARGET, PRIMARY_TARGET);
       expectAllowedForTarget({ allowFrom: [PRIMARY_TARGET], mode: "broadcast" });
+    });
+  });
+
+  describe("allowSendTo override", () => {
+    it("allows message when target is in allowSendTo even if not in allowFrom", () => {
+      // Mock order: allowSendTo[0] normalize, then 'to' normalize (allowFrom is skipped)
+      mockNormalizedDirectMessage(PRIMARY_TARGET, PRIMARY_TARGET);
+      expectAllowedForTarget({
+        allowFrom: [SECONDARY_TARGET],
+        mode: "implicit",
+        allowSendTo: [PRIMARY_TARGET],
+      });
+    });
+
+    it("denies message when target is not in allowSendTo even if in allowFrom", () => {
+      // Mock order: allowSendTo[0] normalize, then 'to' normalize (allowFrom is skipped)
+      mockNormalizedDirectMessage(SECONDARY_TARGET, PRIMARY_TARGET);
+      expectDeniedForTarget({
+        allowFrom: [PRIMARY_TARGET],
+        mode: "implicit",
+        allowSendTo: [SECONDARY_TARGET],
+      });
+    });
+
+    it("allows any target when allowSendTo contains wildcard", () => {
+      mockNormalizedDirectMessage(PRIMARY_TARGET);
+      expectAllowedForTarget({
+        allowFrom: [SECONDARY_TARGET],
+        mode: "implicit",
+        allowSendTo: ["*"],
+      });
+    });
+
+    it("falls back to allowFrom when allowSendTo is undefined", () => {
+      mockNormalizedDirectMessage(PRIMARY_TARGET, PRIMARY_TARGET);
+      expectAllowedForTarget({
+        allowFrom: [PRIMARY_TARGET],
+        mode: "implicit",
+        allowSendTo: undefined,
+      });
+    });
+
+    it("falls back to allowFrom when allowSendTo is undefined and target not in list", () => {
+      mockNormalizedDirectMessage(PRIMARY_TARGET, SECONDARY_TARGET);
+      expectDeniedForTarget({
+        allowFrom: [SECONDARY_TARGET],
+        mode: "implicit",
+        allowSendTo: undefined,
+      });
+    });
+
+    it("blocks all outbound when allowSendTo is empty array", () => {
+      mockNormalizedDirectMessage(PRIMARY_TARGET);
+      expectDeniedForTarget({
+        allowFrom: ["*"],
+        mode: "implicit",
+        allowSendTo: [],
+      });
     });
   });
 

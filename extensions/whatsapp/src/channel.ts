@@ -1,5 +1,4 @@
 import { buildDmGroupAccountAllowlistAdapter } from "openclaw/plugin-sdk/allowlist-config-edit";
-// WhatsApp-specific imports from local extension code (moved from src/web/ and src/channels/plugins/)
 import { resolveWhatsAppAccount, type ResolvedWhatsAppAccount } from "./accounts.js";
 import type { WebChannelStatus } from "./auto-reply/types.js";
 import {
@@ -17,6 +16,7 @@ import {
   DEFAULT_ACCOUNT_ID,
   formatWhatsAppConfigAllowFromEntries,
   readStringParam,
+  resolveWhatsAppConfigAllowSendTo,
   resolveWhatsAppGroupIntroHint,
   resolveWhatsAppOutboundTarget,
   resolveWhatsAppHeartbeatRecipients,
@@ -161,8 +161,8 @@ export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {
       sendPollWhatsApp: async (...args) =>
         await getWhatsAppRuntime().channel.whatsapp.sendPollWhatsApp(...args),
       shouldLogVerbose: () => getWhatsAppRuntime().logging.shouldLogVerbose(),
-      resolveTarget: ({ to, allowFrom, mode }) =>
-        resolveWhatsAppOutboundTarget({ to, allowFrom, mode }),
+      resolveTarget: ({ to, allowFrom, allowSendTo, mode }) =>
+        resolveWhatsAppOutboundTarget({ to, allowFrom, allowSendTo, mode }),
     }),
     normalizePayload: ({ payload }) => ({
       ...payload,
@@ -260,6 +260,7 @@ export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {
         lastError: runtime?.lastError ?? null,
         dmPolicy: account.dmPolicy,
         allowFrom: account.allowFrom,
+        allowSendTo: account.allowSendTo,
       };
     },
     resolveAccountState: ({ configured }) => (configured ? "linked" : "not linked"),

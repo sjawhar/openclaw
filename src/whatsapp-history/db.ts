@@ -4,6 +4,8 @@ import type { DatabaseSync } from "node:sqlite";
 import { resolveStateDir } from "../config/paths.js";
 import { requireNodeSqlite } from "../memory/sqlite.js";
 
+type SqlValue = string | number | bigint | Uint8Array | null;
+
 let db: DatabaseSync | null = null;
 
 function resolveHistoryDbPath(): string {
@@ -169,8 +171,9 @@ export function insertWhatsAppHistoryMessages(messages: WhatsAppHistoryMessageRe
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   let count = 0;
-  const tx = db.transaction((rows: WhatsAppHistoryMessageRecord[]) => {
-    for (const msg of rows) {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    for (const msg of messages) {
       const result = stmt.run(
         msg.id,
         msg.chat_jid,
@@ -192,8 +195,11 @@ export function insertWhatsAppHistoryMessages(messages: WhatsAppHistoryMessageRe
         count += 1;
       }
     }
-  });
-  tx(messages);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
   return count;
 }
 
@@ -319,7 +325,7 @@ export function searchWhatsAppHistory(
 ): WhatsAppHistorySearchResult[] {
   const db = ensureDb();
   const conditions: string[] = [];
-  const params: unknown[] = [];
+  const params: SqlValue[] = [];
   if (opts.query) {
     conditions.push(`m.rowid IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)`);
     params.push(opts.query);

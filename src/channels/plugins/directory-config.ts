@@ -1,8 +1,8 @@
-import type { OpenClawConfig } from "../../config/types.js";
-import { inspectDiscordAccount } from "../../discord/account-inspect.js";
+import type { OpenClawConfig } from "../../config/config.js";
+import { inspectDiscordAccount } from "../../../extensions/discord/src/account-inspect.js";
 import { mapAllowFromEntries } from "../../plugin-sdk/channel-config-helpers.js";
-import { inspectSlackAccount } from "../../slack/account-inspect.js";
-import { inspectTelegramAccount } from "../../telegram/account-inspect.js";
+import { inspectSlackAccount } from "../../../extensions/slack/src/account-inspect.js";
+import { inspectTelegramAccount } from "../../../extensions/telegram/src/account-inspect.js";
 import { resolveWhatsAppAccount } from "../../web/accounts.js";
 import { isWhatsAppGroupJid, normalizeWhatsAppTarget } from "../../whatsapp/normalize.js";
 import { applyDirectoryQueryAndLimit, toDirectoryEntries } from "./directory-config-helpers.js";
@@ -62,7 +62,7 @@ export async function listSlackDirectoryPeersFromConfig(
   const ids = new Set<string>();
 
   addAllowFromAndDmsIds(ids, account.config.allowFrom ?? account.dm?.allowFrom, account.config.dms);
-  for (const channel of Object.values(account.config.channels ?? {})) {
+  for (const channel of Object.values(account.config.channels ?? {}) as Array<{ users?: unknown[] }>) {
     addTrimmedEntries(ids, channel.users ?? []);
   }
 
@@ -101,9 +101,12 @@ export async function listDiscordDirectoryPeersFromConfig(
     account.config.allowFrom ?? account.config.dm?.allowFrom,
     account.config.dms,
   );
-  for (const guild of Object.values(account.config.guilds ?? {})) {
+  for (const guild of Object.values(account.config.guilds ?? {}) as Array<{
+    users?: unknown[];
+    channels?: Record<string, { users?: unknown[] }>;
+  }>) {
     addTrimmedEntries(ids, guild.users ?? []);
-    for (const channel of Object.values(guild.channels ?? {})) {
+    for (const channel of Object.values(guild.channels ?? {}) as Array<{ users?: unknown[] }>) {
       addTrimmedEntries(ids, channel.users ?? []);
     }
   }
@@ -124,7 +127,9 @@ export async function listDiscordDirectoryGroupsFromConfig(
 ): Promise<ChannelDirectoryEntry[]> {
   const account = inspectDiscordAccount({ cfg: params.cfg, accountId: params.accountId });
   const ids = new Set<string>();
-  for (const guild of Object.values(account.config.guilds ?? {})) {
+  for (const guild of Object.values(account.config.guilds ?? {}) as Array<{
+    channels?: Record<string, unknown>;
+  }>) {
     addTrimmedEntries(ids, Object.keys(guild.channels ?? {}));
   }
 

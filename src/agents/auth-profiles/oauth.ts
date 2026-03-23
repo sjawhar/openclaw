@@ -10,7 +10,7 @@ import { withFileLock } from "../../infra/file-lock.js";
 import { resolvePluginProviders } from "../../plugins/providers.js";
 import { getActivePluginRegistry } from "../../plugins/runtime.js";
 import type { ProviderPlugin } from "../../plugins/types.js";
-import { refreshQwenPortalCredentials } from "../../providers/qwen-portal-oauth.js";
+import { refreshQwenPortalCredentials } from "../../../extensions/qwen-portal-auth/refresh.js";
 import { resolveSecretRefString, type SecretRefResolveCache } from "../../secrets/resolve.js";
 import { refreshChutesTokens } from "../chutes-oauth.js";
 import { normalizeProviderId } from "../model-selection.js";

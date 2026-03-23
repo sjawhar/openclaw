@@ -14,6 +14,7 @@ import {
   ensureApiKeyFromOptionEnvOrPrompt,
   listProfilesForProvider,
   normalizeApiKeyInput,
+  resolveOAuthApiKeyMarker,
   suggestOAuthProfileIdForLegacyDefault,
   type AuthProfileStore,
   type ProviderAuthResult,
@@ -370,6 +371,25 @@ export default definePluginEntry({
           },
         }),
       ],
+      catalog: {
+        order: "profile",
+        run: async (ctx) => {
+          const { apiKey } = ctx.resolveProviderAuth(PROVIDER_ID, {
+            oauthMarker: resolveOAuthApiKeyMarker(PROVIDER_ID),
+          });
+          if (!apiKey) {
+            return null;
+          }
+          const existingProvider = ctx.config?.models?.providers?.[PROVIDER_ID] ?? {};
+          return {
+            provider: {
+              ...existingProvider,
+              api: existingProvider.api ?? "anthropic-messages",
+              apiKey,
+            },
+          };
+        },
+      },
       resolveDynamicModel: (ctx) => resolveAnthropicForwardCompatModel(ctx),
       capabilities: {
         providerFamily: "anthropic",

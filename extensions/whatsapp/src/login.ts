@@ -14,6 +14,16 @@ import {
   waitForWaConnection,
 } from "./session.js";
 
+const INITIAL_SYNC_SETTLE_MS = 20_000;
+
+async function waitForInitialSyncSettle(runtime: RuntimeEnv) {
+  logInfo(
+    `Waiting ${Math.floor(INITIAL_SYNC_SETTLE_MS / 1000)}s for initial WhatsApp sync to settle…`,
+    runtime,
+  );
+  await new Promise((resolve) => setTimeout(resolve, INITIAL_SYNC_SETTLE_MS));
+}
+
 export async function loginWeb(
   verbose: boolean,
   waitForConnection?: typeof waitForWaConnection,
@@ -29,6 +39,7 @@ export async function loginWeb(
   logInfo("Waiting for WhatsApp connection...", runtime);
   try {
     await wait(sock);
+    await waitForInitialSyncSettle(runtime);
     console.log(success("✅ Linked! Credentials saved for future sends."));
   } catch (err) {
     const code = getStatusCode(err);
@@ -47,6 +58,7 @@ export async function loginWeb(
       });
       try {
         await wait(retry);
+        await waitForInitialSyncSettle(runtime);
         console.log(success("✅ Linked after restart; web session ready."));
         return;
       } finally {

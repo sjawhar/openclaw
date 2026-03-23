@@ -1,5 +1,5 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
-import { searchWhatsAppHistory } from "../../../src/whatsapp-history/db.js";
+import { searchWhatsAppHistory } from "./history-db.js";
 import { resolveAuthorizedWhatsAppOutboundTarget } from "./action-runtime-target-auth.js";
 import {
   createActionGate,

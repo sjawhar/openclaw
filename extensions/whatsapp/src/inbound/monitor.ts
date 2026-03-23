@@ -1,4 +1,4 @@
-import type { AnyMessageContent, proto, WAMessage } from "@whiskeysockets/baileys";
+import type { AnyMessageContent, Chat, Contact, proto, WAMessage } from "@whiskeysockets/baileys";
 import { DisconnectReason, isJidGroup } from "@whiskeysockets/baileys";
 import { createInboundDebouncer, formatLocationText } from "openclaw/plugin-sdk/channel-inbound";
 import { recordChannelActivity } from "openclaw/plugin-sdk/infra-runtime";
@@ -8,6 +8,14 @@ import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
 import { getChildLogger } from "openclaw/plugin-sdk/text-runtime";
 import { jidToE164, resolveJidToE164 } from "openclaw/plugin-sdk/text-runtime";
 import { createWaSocket, getStatusCode, waitForWaConnection } from "../session.js";
+import { mergeContacts, readContactStore, writeContactStore } from "../contacts-store.js";
+import {
+  captureWhatsAppHistorySet,
+  captureWhatsAppMessagesUpsert,
+  type HistoryContactLike,
+  upsertWhatsAppHistoryChats,
+  upsertWhatsAppHistoryContacts,
+} from "../history-capture.js";
 import { checkInboundAccessControl } from "./access-control.js";
 import { isRecentInboundMessage } from "./dedupe.js";
 import {
@@ -39,8 +47,7 @@ export async function monitorWebInbox(options: {
   const sock = await createWaSocket(false, options.verbose, {
     authDir: options.authDir,
   });
-  await waitForWaConnection(sock);
-  const connectedAtMs = Date.now();
+  let connectedAtMs = Date.now();
 
   let onCloseResolve: ((reason: WebListenerCloseReason) => void) | null = null;
   const onClose = new Promise<WebListenerCloseReason>((resolve) => {
@@ -397,6 +404,10 @@ export async function monitorWebInbox(options: {
     if (upsert.type !== "notify" && upsert.type !== "append") {
       return;
     }
+    captureWhatsAppMessagesUpsert({
+      messages: upsert.messages ?? [],
+      type: upsert.type,
+    });
     for (const msg of upsert.messages ?? []) {
       recordChannelActivity({
         channel: "whatsapp",
@@ -431,6 +442,78 @@ export async function monitorWebInbox(options: {
   };
   sock.ev.on("messages.upsert", handleMessagesUpsert);
 
+  const persistContacts = (
+    contacts: Array<{ id: string; name?: string; notify?: string }>,
+  ) => {
+    try {
+      const existing = readContactStore(options.authDir);
+      const merged = mergeContacts(existing, contacts);
+      writeContactStore(options.authDir, merged);
+    } catch (err) {
+      logVerbose(`Failed to persist WhatsApp contacts: ${String(err)}`);
+    }
+  };
+
+  const handleContactsUpsert = (
+    contacts: HistoryContactLike[],
+  ) => {
+    const valid = contacts
+      .filter((c): c is HistoryContactLike & { id: string } => Boolean(c.id))
+      .map((c) => ({
+        id: c.id,
+        name: c.name ?? undefined,
+        notify: c.notify ?? undefined,
+      }));
+    if (!valid.length) return;
+    persistContacts(valid);
+    upsertWhatsAppHistoryContacts(valid);
+  };
+
+  const handleChatsUpsert = (
+    chats: Chat[],
+  ) => {
+    const valid = chats.filter(
+      (chat): chat is Chat & { id: string } => Boolean(chat.id),
+    );
+    if (!valid.length) return;
+    upsertWhatsAppHistoryChats(valid);
+  };
+
+  const handleMessagingHistorySet = (history: {
+    chats?: Chat[];
+    contacts?: HistoryContactLike[];
+    messages?: Array<WAMessage>;
+  }) => {
+    const validContacts = (history.contacts ?? []).filter(
+      (c): c is HistoryContactLike & { id: string } => Boolean(c.id),
+    ).map((c) => ({
+      id: c.id,
+      name: c.name ?? undefined,
+      notify: c.notify ?? undefined,
+    }));
+    if (validContacts.length) {
+      persistContacts(validContacts);
+      upsertWhatsAppHistoryContacts(validContacts);
+    }
+    const validChats = (history.chats ?? []).filter(
+      (chat): chat is Chat & { id: string } => Boolean(chat.id),
+    );
+    if (validChats.length) {
+      upsertWhatsAppHistoryChats(validChats);
+    }
+    captureWhatsAppHistorySet({
+      chats: validChats,
+      contacts: validContacts,
+      messages: history.messages ?? [],
+    });
+  };
+
+  sock.ev.on("contacts.upsert", handleContactsUpsert);
+  sock.ev.on("contacts.update", handleContactsUpsert);
+  sock.ev.on("chats.upsert", handleChatsUpsert);
+  sock.ev.on("chats.update", handleChatsUpsert);
+  sock.ev.on("messaging-history.set", handleMessagingHistorySet);
+
   const handleConnectionUpdate = (
     update: Partial<import("@whiskeysockets/baileys").ConnectionState>,
   ) => {
@@ -450,6 +533,9 @@ export async function monitorWebInbox(options: {
   };
   sock.ev.on("connection.update", handleConnectionUpdate);
 
+  await waitForWaConnection(sock);
+  connectedAtMs = Date.now();
+
   const sendApi = createWebSendApi({
     sock: {
       sendMessage: (jid: string, content: AnyMessageContent) => sock.sendMessage(jid, content),
@@ -468,14 +554,33 @@ export async function monitorWebInbox(options: {
         const messagesUpsertHandler = handleMessagesUpsert as unknown as (
           ...args: unknown[]
         ) => void;
+        const contactsUpsertHandler = handleContactsUpsert as unknown as (
+          ...args: unknown[]
+        ) => void;
+        const chatsUpsertHandler = handleChatsUpsert as unknown as (
+          ...args: unknown[]
+        ) => void;
+        const messagingHistorySetHandler = handleMessagingHistorySet as unknown as (
+          ...args: unknown[]
+        ) => void;
         const connectionUpdateHandler = handleConnectionUpdate as unknown as (
           ...args: unknown[]
         ) => void;
         if (typeof ev.off === "function") {
           ev.off("messages.upsert", messagesUpsertHandler);
+          ev.off("contacts.upsert", contactsUpsertHandler);
+          ev.off("contacts.update", contactsUpsertHandler);
+          ev.off("chats.upsert", chatsUpsertHandler);
+          ev.off("chats.update", chatsUpsertHandler);
+          ev.off("messaging-history.set", messagingHistorySetHandler);
           ev.off("connection.update", connectionUpdateHandler);
         } else if (typeof ev.removeListener === "function") {
           ev.removeListener("messages.upsert", messagesUpsertHandler);
+          ev.removeListener("contacts.upsert", contactsUpsertHandler);
+          ev.removeListener("contacts.update", contactsUpsertHandler);
+          ev.removeListener("chats.upsert", chatsUpsertHandler);
+          ev.removeListener("chats.update", chatsUpsertHandler);
+          ev.removeListener("messaging-history.set", messagingHistorySetHandler);
           ev.removeListener("connection.update", connectionUpdateHandler);
         }
         sock.ws?.close();

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fsSync from "node:fs";
 import {
+  Browsers,
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
@@ -20,6 +21,14 @@ import {
   resolveWebCredsBackupPath,
   resolveWebCredsPath,
 } from "./auth-store.js";
+import { mergeContacts, readContactStore, writeContactStore } from "./contacts-store.js";
+import {
+  captureWhatsAppHistorySet,
+  captureWhatsAppMessagesUpsert,
+  type HistoryContactLike,
+  upsertWhatsAppHistoryChats,
+  upsertWhatsAppHistoryContacts,
+} from "./history-capture.js";
 import { formatError, getStatusCode } from "./session-errors.js";
 export { formatError, getStatusCode } from "./session-errors.js";
 
@@ -122,12 +131,99 @@ export async function createWaSocket(
     version,
     logger,
     printQRInTerminal: false,
-    browser: ["openclaw", "cli", VERSION],
-    syncFullHistory: false,
+    browser: Browsers.macOS("Desktop"),
+    syncFullHistory: true,
+    shouldSyncHistoryMessage: () => true,
     markOnlineOnConnect: false,
   });
 
   sock.ev.on("creds.update", () => enqueueSaveCreds(authDir, saveCreds, sessionLogger));
+  const persistContacts = (contacts: Array<{ id: string; name?: string; notify?: string }>) => {
+    try {
+      const existing = readContactStore(authDir);
+      const merged = mergeContacts(existing, contacts);
+      writeContactStore(authDir, merged);
+    } catch (err) {
+      sessionLogger.warn({ error: String(err) }, "failed persisting whatsapp contacts");
+    }
+  };
+  const handleContacts = (contacts: HistoryContactLike[]) => {
+    const valid = contacts
+      .filter((c): c is HistoryContactLike & { id: string } => Boolean(c.id))
+      .map((c) => ({
+        id: c.id,
+        name: c.name ?? undefined,
+        notify: c.notify ?? undefined,
+      }));
+    if (!valid.length) {
+      return;
+    }
+    persistContacts(valid);
+    upsertWhatsAppHistoryContacts(valid);
+  };
+  sock.ev.on("messages.upsert", (upsert) => {
+    try {
+      captureWhatsAppMessagesUpsert({
+        messages: upsert.messages ?? [],
+        type: upsert.type,
+      });
+    } catch (err) {
+      sessionLogger.warn({ error: String(err) }, "messages.upsert history capture failed");
+    }
+  });
+  sock.ev.on("contacts.upsert", (contacts) => {
+    try {
+      handleContacts(contacts);
+    } catch (err) {
+      sessionLogger.warn({ error: String(err) }, "contacts.upsert capture failed");
+    }
+  });
+  sock.ev.on("contacts.update", (contacts) => {
+    try {
+      handleContacts(contacts);
+    } catch (err) {
+      sessionLogger.warn({ error: String(err) }, "contacts.update capture failed");
+    }
+  });
+  sock.ev.on("chats.upsert", (chats) => {
+    try {
+      const valid = chats.filter((chat) => Boolean(chat?.id));
+      if (!valid.length) {
+        return;
+      }
+      upsertWhatsAppHistoryChats(valid as never);
+    } catch (err) {
+      sessionLogger.warn({ error: String(err) }, "chats.upsert capture failed");
+    }
+  });
+  sock.ev.on("chats.update", (chats) => {
+    try {
+      const valid = chats.filter((chat) => Boolean(chat?.id));
+      if (!valid.length) {
+        return;
+      }
+      upsertWhatsAppHistoryChats(valid as never);
+    } catch (err) {
+      sessionLogger.warn({ error: String(err) }, "chats.update capture failed");
+    }
+  });
+  sock.ev.on("messaging-history.set", (history) => {
+    try {
+      const contacts = history.contacts ?? [];
+      handleContacts(contacts);
+      const chats = (history.chats ?? []).filter((chat) => Boolean(chat?.id));
+      if (chats.length) {
+        upsertWhatsAppHistoryChats(chats as never);
+      }
+      captureWhatsAppHistorySet({
+        chats: chats as never,
+        contacts: contacts as never,
+        messages: history.messages ?? [],
+      });
+    } catch (err) {
+      sessionLogger.warn({ error: String(err) }, "messaging-history.set capture failed");
+    }
+  });
   sock.ev.on(
     "connection.update",
     (update: Partial<import("@whiskeysockets/baileys").ConnectionState>) => {

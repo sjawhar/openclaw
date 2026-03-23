@@ -3,7 +3,7 @@ import {
   listResolvedDirectoryUserEntriesFromAllowFrom,
   type DirectoryConfigParams,
 } from "openclaw/plugin-sdk/directory-runtime";
-import { readContactStore } from "../../../src/web/contacts-store.js";
+import { readContactStore } from "./contacts-store.js";
 import { resolveWhatsAppAccount } from "./accounts.js";
 import { isWhatsAppGroupJid, normalizeWhatsAppTarget } from "./normalize.js";
 

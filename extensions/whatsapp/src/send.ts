@@ -12,8 +12,8 @@ import {
   insertWhatsAppHistoryMessage,
   upsertWhatsAppHistoryChat,
   upsertWhatsAppHistoryContact,
-} from "../../../src/whatsapp-history/db.js";
-import { readContactStore } from "../../../src/web/contacts-store.js";
+} from "./history-db.js";
+import { readContactStore } from "./contacts-store.js";
 import {
   resolveWhatsAppAccount,
   resolveWhatsAppMediaMaxBytes,

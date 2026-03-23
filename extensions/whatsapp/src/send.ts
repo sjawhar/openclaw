@@ -8,11 +8,36 @@ import { redactIdentifier } from "openclaw/plugin-sdk/text-runtime";
 import { convertMarkdownTables } from "openclaw/plugin-sdk/text-runtime";
 import { markdownToWhatsApp } from "openclaw/plugin-sdk/text-runtime";
 import { toWhatsappJid } from "openclaw/plugin-sdk/text-runtime";
-import { resolveWhatsAppAccount, resolveWhatsAppMediaMaxBytes } from "./accounts.js";
+import {
+  insertWhatsAppHistoryMessage,
+  upsertWhatsAppHistoryChat,
+  upsertWhatsAppHistoryContact,
+} from "../../../src/whatsapp-history/db.js";
+import { readContactStore } from "../../../src/web/contacts-store.js";
+import {
+  resolveWhatsAppAccount,
+  resolveWhatsAppMediaMaxBytes,
+  type ResolvedWhatsAppAccount,
+} from "./accounts.js";
 import { type ActiveWebSendOptions, requireActiveWebListener } from "./active-listener.js";
 import { loadWebMedia } from "./media.js";
 
 const outboundLog = createSubsystemLogger("gateway/channels/whatsapp").child("outbound");
+
+function lookupContact(account: ResolvedWhatsAppAccount, jid: string) {
+  const contacts = readContactStore(account.authDir);
+  const contact = contacts[jid];
+  if (!contact) {
+    return {
+      name: undefined,
+      phone: jid.endsWith("@s.whatsapp.net") ? jid.slice(0, -"@s.whatsapp.net".length) : undefined,
+    };
+  }
+  return {
+    name: contact.name || contact.notify || undefined,
+    phone: contact.phone,
+  };
+}
 
 export async function sendMessageWhatsApp(
   to: string,
@@ -100,6 +125,23 @@ export async function sendMessageWhatsApp(
       : await active.sendMessage(to, text, mediaBuffer, mediaType);
     const messageId = (result as { messageId?: string })?.messageId ?? "unknown";
     const durationMs = Date.now() - startedAt;
+    const contact = lookupContact(account, jid);
+    if (contact.phone || contact.name) {
+      upsertWhatsAppHistoryContact(jid, contact.name, undefined, contact.phone);
+    }
+    upsertWhatsAppHistoryChat(jid, contact.name, jid.endsWith("@g.us"));
+    insertWhatsAppHistoryMessage({
+      id: messageId,
+      chat_jid: jid,
+      chat_name: contact.name,
+      from_me: true,
+      timestamp: Math.floor(Date.now() / 1000),
+      message_type: options.mediaUrl ? mediaType?.split("/")[0] ?? "media" : "text",
+      text_content: text || undefined,
+      caption: options.mediaUrl ? text || undefined : undefined,
+      raw_json: JSON.stringify({ messageId, jid, text }),
+      source: "live",
+    });
     outboundLog.info(
       `Sent message ${messageId} -> ${redactedJid}${options.mediaUrl ? " (media)" : ""} (${durationMs}ms)`,
     );

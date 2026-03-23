@@ -47,8 +47,7 @@ export async function monitorWebInbox(options: {
   const sock = await createWaSocket(false, options.verbose, {
     authDir: options.authDir,
   });
-  await waitForWaConnection(sock);
-  const connectedAtMs = Date.now();
+  let connectedAtMs = Date.now();
 
   let onCloseResolve: ((reason: WebListenerCloseReason) => void) | null = null;
   const onClose = new Promise<WebListenerCloseReason>((resolve) => {
@@ -515,6 +514,9 @@ export async function monitorWebInbox(options: {
     }
   };
   sock.ev.on("connection.update", handleConnectionUpdate);
+
+  await waitForWaConnection(sock);
+  connectedAtMs = Date.now();
 
   const sendApi = createWebSendApi({
     sock: {

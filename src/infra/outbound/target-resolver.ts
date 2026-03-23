@@ -441,7 +441,7 @@ export async function resolveMessagingTarget(params: {
     });
   }
   const query = stripTargetPrefixes(raw);
-  const entries = await getDirectoryEntries({
+  const primaryEntries = await getDirectoryEntries({
     cfg: params.cfg,
     channel: params.channel,
     accountId: params.accountId,
@@ -450,6 +450,18 @@ export async function resolveMessagingTarget(params: {
     runtime: params.runtime,
     preferLiveOnMiss: true,
   });
+  const entries =
+    kind === "group" && primaryEntries.length === 0
+      ? await getDirectoryEntries({
+          cfg: params.cfg,
+          channel: params.channel,
+          accountId: params.accountId,
+          kind: "user",
+          query,
+          runtime: params.runtime,
+          preferLiveOnMiss: true,
+        })
+      : primaryEntries;
   const match = resolveMatch({ channel: params.channel, entries, query });
   if (match.kind === "single") {
     const entry = match.entry;

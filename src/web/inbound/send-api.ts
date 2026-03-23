@@ -1,6 +1,15 @@
 import type { AnyMessageContent, WAPresence } from "@whiskeysockets/baileys";
+import { loadConfig } from "../../config/config.js";
 import { recordChannelActivity } from "../../infra/channel-activity.js";
+import {
+  getWhatsAppHistoryContactName,
+  insertWhatsAppHistoryMessage,
+  upsertWhatsAppHistoryChat,
+  upsertWhatsAppHistoryContact,
+} from "../../whatsapp-history/db.js";
 import { toWhatsappJid } from "../../utils.js";
+import { readContactStore } from "../contacts-store.js";
+import { resolveWhatsAppAccount } from "../accounts.js";
 import type { ActiveWebSendOptions } from "../active-listener.js";
 
 function recordWhatsAppOutbound(accountId: string) {
@@ -15,6 +24,31 @@ function resolveOutboundMessageId(result: unknown): string {
   return typeof result === "object" && result && "key" in result
     ? String((result as { key?: { id?: string } }).key?.id ?? "unknown")
     : "unknown";
+}
+
+function lookupWhatsAppContactMetadata(params: {
+  accountId: string;
+  jid: string;
+}): { name?: string; phone?: string } {
+  try {
+    const cfg = loadConfig();
+    const account = resolveWhatsAppAccount({ cfg, accountId: params.accountId });
+    const contacts = readContactStore(account.authDir);
+    const direct = contacts[params.jid];
+    if (direct) {
+      return {
+        name: direct.name || direct.notify || undefined,
+        phone: direct.phone,
+      };
+    }
+  } catch {
+  }
+  return {
+    name: getWhatsAppHistoryContactName(params.jid) ?? undefined,
+    phone: params.jid.endsWith("@s.whatsapp.net")
+      ? params.jid.slice(0, -"@s.whatsapp.net".length)
+      : undefined,
+  };
 }
 
 function resolveWhatsAppExistenceResult(entry: unknown): { exists: boolean; jid?: string } {
@@ -112,6 +146,23 @@ export function createWebSendApi(params: {
       const accountId = sendOptions?.accountId ?? params.defaultAccountId;
       recordWhatsAppOutbound(accountId);
       const messageId = resolveOutboundMessageId(result);
+      const contact = lookupWhatsAppContactMetadata({ accountId, jid });
+      if (contact.phone || contact.name) {
+        upsertWhatsAppHistoryContact(jid, contact.name, undefined, contact.phone);
+      }
+      upsertWhatsAppHistoryChat(jid, contact.name, jid.endsWith("@g.us"));
+      insertWhatsAppHistoryMessage({
+        id: messageId,
+        chat_jid: jid,
+        chat_name: contact.name,
+        from_me: true,
+        timestamp: Math.floor(Date.now() / 1000),
+        message_type: mediaBuffer ? mediaType?.split("/")[0] ?? "media" : "text",
+        text_content: text || undefined,
+        caption: mediaBuffer ? text || undefined : undefined,
+        raw_json: JSON.stringify({ payload, result }),
+        source: "live",
+      });
       return { messageId };
     },
     sendPoll: async (

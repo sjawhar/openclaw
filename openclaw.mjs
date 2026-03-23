@@ -130,6 +130,8 @@ if (await tryImport("./dist/entry.js")) {
   // OK
 } else if (await tryImport("./dist/entry.mjs")) {
   // OK
+} else if (await tryImport("./dist/index.js")) {
+  // OK
 } else {
   throw new Error(await buildMissingEntryErrorMessage());
 }

@@ -88,6 +88,75 @@ type ResolvedModelsAuthContext = {
   providers: ProviderPlugin[];
 };
 
+function resolveConfiguredProviderModes(config: OpenClawConfig): Map<string, Set<string>> {
+  const modes = new Map<string, Set<string>>();
+  for (const profile of Object.values(config.auth?.profiles ?? {})) {
+    const provider = normalizeProviderId(profile.provider);
+    if (!provider) {
+      continue;
+    }
+    const modeSet = modes.get(provider) ?? new Set<string>();
+    modeSet.add(profile.mode);
+    modes.set(provider, modeSet);
+  }
+  return modes;
+}
+
+function selectPreferredProviderVariant(
+  variants: ProviderPlugin[],
+  configuredModes: ReadonlySet<string> | undefined,
+  explicitInstallPluginIds: ReadonlySet<string>,
+): ProviderPlugin {
+  const score = (provider: ProviderPlugin): number => {
+    let total = 0;
+    const kinds = new Set(provider.auth.map((method) => method.kind));
+    if (provider.pluginId && explicitInstallPluginIds.has(provider.pluginId)) {
+      total += 1000;
+    }
+    if (configuredModes?.has("oauth") && kinds.has("oauth")) {
+      total += 100;
+    }
+    if (configuredModes?.has("token") && kinds.has("token")) {
+      total += 100;
+    }
+    if (configuredModes?.has("api_key") && kinds.has("api_key")) {
+      total += 100;
+    }
+    if (provider.pluginId && provider.pluginId !== provider.id) {
+      total += 10;
+    }
+    return total;
+  };
+
+  return [...variants].sort((left, right) => score(right) - score(left))[0] ?? variants[0]!;
+}
+
+function dedupeProviderVariants(
+  providers: ProviderPlugin[],
+  config: OpenClawConfig,
+): ProviderPlugin[] {
+  const configuredModes = resolveConfiguredProviderModes(config);
+  const explicitInstallPluginIds = new Set(Object.keys(config.plugins?.installs ?? {}));
+  const grouped = new Map<string, ProviderPlugin[]>();
+  for (const provider of providers) {
+    const key = normalizeProviderId(provider.id);
+    const list = grouped.get(key) ?? [];
+    list.push(provider);
+    grouped.set(key, list);
+  }
+  return providers.filter((provider) => {
+    const key = normalizeProviderId(provider.id);
+    const variants = grouped.get(key) ?? [provider];
+    return (
+      selectPreferredProviderVariant(
+        variants,
+        configuredModes.get(key),
+        explicitInstallPluginIds,
+      ) === provider
+    );
+  });
+}
+
 function listProvidersWithAuthMethods(providers: ProviderPlugin[]): ProviderPlugin[] {
   return providers.filter((provider) => provider.auth.length > 0);
 }
@@ -107,12 +176,23 @@ async function resolveModelsAuthContext(): Promise<ResolvedModelsAuthContext> {
   const workspaceDir =
     resolveAgentWorkspaceDir(config, defaultAgentId) ?? resolveDefaultAgentWorkspaceDir();
   const providers = resolvePluginProviders({
+      config,
+      workspaceDir,
+      bundledProviderAllowlistCompat: true,
+      bundledProviderVitestCompat: true,
+    });
+  const preferredInstalledAnthropicProviders = config.plugins?.installs?.["openclaw-anthropic-oauth"]
+    ? resolvePluginProviders({
+        config,
+        workspaceDir,
+        onlyPluginIds: ["openclaw-anthropic-oauth"],
+      }).filter((provider) => normalizeProviderId(provider.id) === "anthropic")
+    : [];
+  const dedupedProviders = dedupeProviderVariants(
+    [...preferredInstalledAnthropicProviders, ...providers],
     config,
-    workspaceDir,
-    bundledProviderAllowlistCompat: true,
-    bundledProviderVitestCompat: true,
-  });
-  return { config, agentDir, workspaceDir, providers };
+  );
+  return { config, agentDir, workspaceDir, providers: dedupedProviders };
 }
 
 function resolveRequestedProviderOrThrow(

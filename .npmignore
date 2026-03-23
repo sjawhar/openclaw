@@ -1,2 +1,4 @@
 **/node_modules/
 docs/.generated/
+dist/extensions/
+dist/extensions/

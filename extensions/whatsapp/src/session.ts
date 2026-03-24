@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import fsSync from "node:fs";
+import path from "node:path";
 import {
   Browsers,
   DisconnectReason,
@@ -29,6 +30,7 @@ import {
   upsertWhatsAppHistoryChats,
   upsertWhatsAppHistoryContacts,
 } from "./history-capture.js";
+import { upsertWhatsAppHistoryContact } from "./history-db.js";
 import { formatError, getStatusCode } from "./session-errors.js";
 export { formatError, getStatusCode } from "./session-errors.js";
 
@@ -147,6 +149,21 @@ export async function createWaSocket(
       sessionLogger.warn({ error: String(err) }, "failed persisting whatsapp contacts");
     }
   };
+
+  // Backfill LID mappings from Baileys auth state (lid-mapping-*.json files)
+  try {
+    const lidFiles = fsSync.readdirSync(authDir).filter((f: string) => f.startsWith('lid-mapping-') && !f.includes('reverse') && f.endsWith('.json'));
+    for (const file of lidFiles) {
+      const phone = file.replace('lid-mapping-', '').replace('.json', '');
+      const lidRaw = JSON.parse(fsSync.readFileSync(path.join(authDir, file), 'utf8'));
+      const lid = typeof lidRaw === 'string' ? `${lidRaw}@lid` : null;
+      if (lid && phone) {
+        upsertWhatsAppHistoryContact(`${phone}@s.whatsapp.net`, undefined, undefined, phone, lid);
+      }
+    }
+  } catch (err) {
+    sessionLogger.warn({ error: String(err) }, 'failed backfilling LID mappings from auth state');
+  }
   const handleContacts = (contacts: HistoryContactLike[]) => {
     const valid = contacts
       .filter((c): c is HistoryContactLike & { id: string } => Boolean(c.id))
@@ -154,6 +171,7 @@ export async function createWaSocket(
         id: c.id,
         name: c.name ?? undefined,
         notify: c.notify ?? undefined,
+        lid: (c as Record<string, unknown>).lid as string | undefined,
       }));
     if (!valid.length) {
       return;
@@ -209,17 +227,24 @@ export async function createWaSocket(
   });
   sock.ev.on("messaging-history.set", (history) => {
     try {
+      const syncType = (history as Record<string, unknown>).syncType;
+      const isLatest = (history as Record<string, unknown>).isLatest;
+      const progress = (history as Record<string, unknown>).progress;
       const contacts = history.contacts ?? [];
+      const rawMessages = history.messages ?? [];
+      const rawChats = history.chats ?? [];
+      console.log(`[HISTORY-DIAG] messaging-history.set fired: syncType=${syncType} messages=${rawMessages.length} chats=${rawChats.length} contacts=${contacts.length} isLatest=${isLatest} progress=${progress}`);
       handleContacts(contacts);
-      const chats = (history.chats ?? []).filter((chat) => Boolean(chat?.id));
+      const chats = rawChats.filter((chat) => Boolean(chat?.id));
       if (chats.length) {
         upsertWhatsAppHistoryChats(chats as never);
       }
-      captureWhatsAppHistorySet({
+      const inserted = captureWhatsAppHistorySet({
         chats: chats as never,
         contacts: contacts as never,
-        messages: history.messages ?? [],
+        messages: rawMessages,
       });
+      console.log(`[HISTORY-DIAG] captureWhatsAppHistorySet: ${inserted} new messages inserted out of ${rawMessages.length} total`);
     } catch (err) {
       sessionLogger.warn({ error: String(err) }, "messaging-history.set capture failed");
     }

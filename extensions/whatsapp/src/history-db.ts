@@ -61,8 +61,10 @@ function ensureDb(): DatabaseSync {
       name TEXT,
       notify TEXT,
       phone TEXT,
+      lid TEXT,
       updated_at INTEGER DEFAULT (strftime('%s','now'))
     );
+    CREATE INDEX IF NOT EXISTS idx_contacts_lid ON contacts(lid);
     CREATE TABLE IF NOT EXISTS chats (
       jid TEXT PRIMARY KEY,
       name TEXT,
@@ -74,6 +76,9 @@ function ensureDb(): DatabaseSync {
     CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_jid);
     CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
   `);
+  // Migration: add lid column to existing contacts table
+  try { db.exec("ALTER TABLE contacts ADD COLUMN lid TEXT"); } catch { /* already exists */ }
+  try { db.exec("CREATE INDEX IF NOT EXISTS idx_contacts_lid ON contacts(lid)"); } catch { /* already exists */ }
   return db;
 }
 
@@ -148,17 +153,18 @@ export function insertWhatsAppHistoryMessages(messages: HistoryMessageRecord[]):
   return count;
 }
 
-export function upsertWhatsAppHistoryContact(jid: string, name?: string, notify?: string, phone?: string): void {
+export function upsertWhatsAppHistoryContact(jid: string, name?: string, notify?: string, phone?: string, lid?: string): void {
   const db = ensureDb();
   db.prepare(`
-    INSERT INTO contacts (jid, name, notify, phone, updated_at)
-    VALUES (?, ?, ?, ?, strftime('%s','now'))
+    INSERT INTO contacts (jid, name, notify, phone, lid, updated_at)
+    VALUES (?, ?, ?, ?, ?, strftime('%s','now'))
     ON CONFLICT(jid) DO UPDATE SET
       name = COALESCE(excluded.name, name),
       notify = COALESCE(excluded.notify, notify),
       phone = COALESCE(excluded.phone, phone),
+      lid = COALESCE(excluded.lid, lid),
       updated_at = strftime('%s','now')
-  `).run(jid, name ?? null, notify ?? null, phone ?? null);
+  `).run(jid, name ?? null, notify ?? null, phone ?? null, lid ?? null);
 }
 
 export function upsertWhatsAppHistoryChat(jid: string, name?: string, isGroup?: boolean, participantCount?: number): void {
@@ -176,8 +182,15 @@ export function upsertWhatsAppHistoryChat(jid: string, name?: string, isGroup?: 
 
 export function getWhatsAppHistoryContactName(jid: string): string | null {
   const db = ensureDb();
+  // Direct lookup first
   const row = db.prepare('SELECT name, notify FROM contacts WHERE jid = ?').get(jid) as {name?: string|null, notify?: string|null}|undefined;
-  return row?.name ?? row?.notify ?? null;
+  if (row?.name ?? row?.notify) return row?.name ?? row?.notify ?? null;
+  // If JID is a LID, look up the phone-JID contact that has this LID
+  if (jid.endsWith('@lid')) {
+    const lidRow = db.prepare('SELECT name, notify FROM contacts WHERE lid = ?').get(jid) as {name?: string|null, notify?: string|null}|undefined;
+    return lidRow?.name ?? lidRow?.notify ?? null;
+  }
+  return null;
 }
 
 export function searchWhatsAppHistory(opts: {
@@ -197,8 +210,8 @@ export function searchWhatsAppHistory(opts: {
     params.push(opts.query);
   }
   if (opts.chat) {
-    conditions.push(`(m.chat_jid LIKE ? OR m.chat_name LIKE ?)`);
-    params.push(`%${opts.chat}%`, `%${opts.chat}%`);
+    conditions.push(`(m.chat_jid LIKE ? OR m.chat_name LIKE ? OR c_direct.name LIKE ? OR c_lid.name LIKE ?)`);
+    params.push(`%${opts.chat}%`, `%${opts.chat}%`, `%${opts.chat}%`, `%${opts.chat}%`);
   }
   if (opts.sender) {
     conditions.push(`(m.sender_jid LIKE ? OR m.sender_name LIKE ? OR m.sender_pushname LIKE ?)`);
@@ -220,10 +233,14 @@ export function searchWhatsAppHistory(opts: {
   const limit = opts.limit ?? 50;
   params.push(limit);
   return db.prepare(`
-    SELECT id, chat_jid, chat_name, sender_jid, sender_name, sender_pushname, from_me, timestamp, text_content, caption, message_type
+    SELECT m.id, m.chat_jid,
+      COALESCE(m.chat_name, c_direct.name, c_direct.notify, c_lid.name, c_lid.notify) as chat_name,
+      m.sender_jid, m.sender_name, m.sender_pushname, m.from_me, m.timestamp, m.text_content, m.caption, m.message_type
     FROM messages m
+    LEFT JOIN contacts c_direct ON c_direct.jid = m.chat_jid
+    LEFT JOIN contacts c_lid ON c_lid.lid = m.chat_jid
     ${where}
-    ORDER BY timestamp DESC
+    ORDER BY m.timestamp DESC
     LIMIT ?
   `).all(...params).map((row) => ({
     ...row,

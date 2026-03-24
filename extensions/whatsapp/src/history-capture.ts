@@ -26,7 +26,7 @@ function extractTextContent(msg: WAMessage): { text: string | null; type: string
   return { text: null, type: 'unknown' };
 }
 
-function waMessageToRecord(msg: WAMessage, chatName?: string): HistoryMessageRecord | null {
+function waMessageToRecord(msg: WAMessage, chatName?: string, source = 'live'): HistoryMessageRecord | null {
   const key = msg.key;
   if (!key.remoteJid || !key.id) return null;
   const chatJid = jidNormalizedUser(key.remoteJid);
@@ -53,7 +53,7 @@ function waMessageToRecord(msg: WAMessage, chatName?: string): HistoryMessageRec
     text_content: text || undefined,
     caption: type !== 'text' ? text || undefined : undefined,
     raw_json: JSON.stringify(msg),
-    source: 'live',
+    source: source,
   };
 }
 
@@ -61,13 +61,15 @@ export type HistoryContactLike = {
   id?: string | null;
   name?: string | null;
   notify?: string | null;
+  lid?: string | null;
 };
 
 export function upsertWhatsAppHistoryContacts(contacts: HistoryContactLike[]): void {
   for (const c of contacts) {
     if (!c.id) continue;
     const jid = jidNormalizedUser(c.id);
-    upsertWhatsAppHistoryContact(jid, c.name || undefined, c.notify || undefined, contactPhoneFromJid(jid));
+    const lid = c.lid ? jidNormalizedUser(c.lid) : undefined;
+    upsertWhatsAppHistoryContact(jid, c.name || undefined, c.notify || undefined, contactPhoneFromJid(jid), lid);
   }
 }
 
@@ -87,7 +89,23 @@ export function upsertWhatsAppHistoryChats(chats: Chat[]): void {
 export function captureWhatsAppHistorySet(params: { chats: Chat[]; contacts: Contact[]; messages: WAMessage[] }): number {
   upsertWhatsAppHistoryContacts(params.contacts);
   upsertWhatsAppHistoryChats(params.chats);
-  const records = params.messages.map((m) => waMessageToRecord(m)).filter((m): m is HistoryMessageRecord => Boolean(m));
+  let filtered = 0;
+  const records: HistoryMessageRecord[] = [];
+  for (const m of params.messages) {
+    const rec = waMessageToRecord(m, undefined, 'history');
+    if (rec) {
+      records.push(rec);
+    } else {
+      filtered++;
+      // Log the first few filtered messages for debugging
+      if (filtered <= 5) {
+        console.warn(`[HISTORY-DIAG] waMessageToRecord returned null: remoteJid=${m.key?.remoteJid} id=${m.key?.id} hasMessage=${!!m.message}`);
+      }
+    }
+  }
+  if (filtered > 0) {
+    console.warn(`[HISTORY-DIAG] ${filtered}/${params.messages.length} messages filtered out by waMessageToRecord`);
+  }
   return insertWhatsAppHistoryMessages(records);
 }
 
